@@ -234,22 +234,39 @@ def _get_serial():
         return None
 
 
+def enviar_serial(cmd: str):
+    """Envia comando raw via serial ao Arduino."""
+    s = _get_serial()
+    if s:
+        try:
+            s.write(f"{cmd}\n".encode())
+            print(f"[AMANDA serial] → Arduino: {cmd}")
+        except Exception as e:
+            print(f"[AMANDA serial] erro: {e}")
+    else:
+        print(f"[AMANDA serial] sem porta — cmd: {cmd}")
+
+
+def enviar_mtd(estado: str):
+    """
+    Modo de Torque Dinâmico — controla energia dos servos.
+    estados: IDLE (descanso, detach não-âncoras) | DEFENSE (hold âncoras) | ATTACK (burst total)
+    Histerese no Arduino: ATTACK retorna para DEFENSE automaticamente após 500ms.
+    """
+    enviar_serial(f"MTD:{estado}")
+    notificar_dodge(
+        {"IDLE": "patrulha", "DEFENSE": "alerta", "ATTACK": "combate"}.get(estado, "patrulha"),
+        {"mtd": estado},
+    )
+
+
 def enviar_mma_arduino(estado: str):
     """
     Envia estado MMA ao Arduino via serial.
     Estados: LIVRE | DEFESA | PATADA_EF | INVESTIDA
-    Arduino lê com Serial.readStringUntil('\\n') e chama a função correspondente.
+    O Arduino garante ATTACK no MTD antes de executar qualquer manobra.
     """
-    cmd = f"MMA:{estado}\n"
-    s = _get_serial()
-    if s:
-        try:
-            s.write(cmd.encode())
-            print(f"[AMANDA MMA] → Arduino: {cmd.strip()}")
-        except Exception as e:
-            print(f"[AMANDA MMA] serial erro: {e}")
-    else:
-        print(f"[AMANDA MMA] sem serial — estado: {estado}")
+    enviar_serial(f"MMA:{estado}")
 
 
 # ── DODGE Bridge ──────────────────────────────────────────────────────────────
@@ -275,8 +292,12 @@ def ciclo_amanda():
     falar(f"Amanda acordando. {jargao()}")
     print("[AMANDA] Iniciando ciclo. Soneto da estrada.")
 
-    ultimo_heartbeat = 0
-    ultima_leitura   = 0
+    ultimo_heartbeat  = 0
+    ultima_leitura    = 0
+    ultimo_som        = 0.0   # timestamp do último som detectado
+    SOM_ALERTA_SECS   = 10.0  # janela de alerta após som antes de voltar a IDLE
+
+    enviar_mtd("IDLE")  # começa economizando
 
     while True:
         agora = time.time()
@@ -314,29 +335,33 @@ def ciclo_amanda():
                     falar(pensamento)
                     print(f"[AMANDA pensamento] {pensamento}")
 
-        # MPU6050 — detecção de queda/impacto
+        # MPU6050 — detecção de queda/impacto → ATTACK + DEFESA
         mpu = ler_mpu6050()
         if mpu.get("queda"):
-            print(f"[AMANDA MPU] Impacto detectado! magnitude={mpu.get('magnitude'):.0f}")
+            print(f"[AMANDA MPU] Impacto! magnitude={mpu.get('magnitude', 0):.0f}")
+            enviar_mtd("ATTACK")
             enviar_mma_arduino("DEFESA")
-            notificar_dodge("alerta", {"sensor": "mpu6050", "magnitude": mpu.get("magnitude")})
             pensamento = pensar(
                 "Detectei impacto no chassi. Ativei defesa plastrão. Reaja no estilo Amanda PX."
             )
             falar(pensamento)
-            time.sleep(2)  # aguarda manobra completar antes de continuar
-            enviar_mma_arduino("LIVRE")
-            notificar_dodge("patrulha")
+            time.sleep(2)  # aguarda manobra completar
+            enviar_mtd("IDLE")
 
-        # Detecção de som
+        # Detecção de som → DEFENSE por janela de alerta
         if detectar_som():
             print("[AMANDA som] Barulho detectado!")
-            notificar_dodge("alerta", {"sensor": "hw493"})
+            ultimo_som = agora
+            enviar_mtd("DEFENSE")
             pensamento = pensar(
                 "Detectei um som no laboratório. Reaja brevemente, no estilo Amanda PX."
             )
             falar(pensamento)
-            notificar_dodge("patrulha")
+
+        # Volta para IDLE após janela de alerta sem novos sons
+        if ultimo_som > 0 and (agora - ultimo_som) >= SOM_ALERTA_SECS:
+            enviar_mtd("IDLE")
+            ultimo_som = 0.0
 
         time.sleep(0.5)
 
