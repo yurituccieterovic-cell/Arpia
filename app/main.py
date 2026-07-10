@@ -1,0 +1,66 @@
+"""
+Arpia — API FastAPI (ponto de entrada)
+Conecta: Manga (PostgreSQL) | Socoboy (Telegram bot) | PAP Site | MEKY
+
+Deploy: Railway → Procfile web process
+"""
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+
+from app.core.config import get_settings
+from app.core.database import init_db, close_db
+from app.routes import health, auth, chat, clube, semiotics, tasks, view, hardware, mc, governance, fractal, agents
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    cfg = get_settings()
+    await init_db()
+    yield
+    await close_db()
+
+
+def create_app() -> FastAPI:
+    cfg = get_settings()
+
+    app = FastAPI(
+        title=cfg.app_name,
+        version=cfg.app_version,
+        docs_url="/docs" if cfg.debug else None,   # docs só em debug
+        redoc_url=None,
+        lifespan=lifespan,
+    )
+
+    # ── CORS — permite o PAP site e o Socoboy ─────────────────────────────
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cfg.allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+    # ── Rotas ─────────────────────────────────────────────────────────────
+    app.include_router(health.router)
+    app.include_router(auth.router)
+    app.include_router(chat.router)
+    app.include_router(clube.router)
+    app.include_router(semiotics.router)
+    app.include_router(tasks.router)
+    app.include_router(view.router)
+    app.include_router(hardware.router)
+    app.include_router(mc.router)
+    app.include_router(governance.router)
+    app.include_router(fractal.router)
+    app.include_router(agents.router)
+
+    @app.get("/")
+    async def root():
+        return {"arpia": cfg.app_version, "manga": "online"}
+
+    return app
+
+
+app = create_app()
