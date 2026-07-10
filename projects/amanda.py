@@ -30,6 +30,13 @@ LED_PIN         = int(os.getenv("LED_PIN", "18"))
 POLL_INTERVAL   = 2.0   # DHT11 exige >= 2s entre leituras
 HEARTBEAT_SECS  = 30    # envia pulso de vida a cada 30s
 
+# MMA + DODGE
+ARDUINO_PORT    = os.getenv("ARDUINO_PORT", "/dev/ttyUSB0")   # porta serial do Arduino
+ARDUINO_BAUD    = int(os.getenv("ARDUINO_BAUD", "9600"))
+DODGE_URL       = os.getenv("DODGE_URL", "http://localhost:8090")  # Quebradinha local
+MPU6050_ADDR    = 0x68  # endereço I2C padrão do MPU6050
+QUEDA_THRESHOLD = float(os.getenv("QUEDA_THRESHOLD", "15000"))  # aceleração de impacto
+
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
 def falar(texto: str):
@@ -176,6 +183,91 @@ def detectar_som() -> bool:
         return False
 
 
+# ── MPU6050 (acelerômetro + giroscópio) ──────────────────────────────────────
+
+def ler_mpu6050() -> dict:
+    """
+    Lê aceleração (x/y/z) e giroscópio do MPU6050 via I2C.
+    Requer smbus2: pip install smbus2
+    Retorna dict com accel_x/y/z, gyro_x/y/z e flag 'queda'.
+    """
+    try:
+        import smbus2
+        bus = smbus2.SMBus(1)
+        bus.write_byte_data(MPU6050_ADDR, 0x6B, 0)  # wake up
+        def read_word(reg):
+            high = bus.read_byte_data(MPU6050_ADDR, reg)
+            low  = bus.read_byte_data(MPU6050_ADDR, reg + 1)
+            val  = (high << 8) + low
+            return val - 65536 if val >= 0x8000 else val
+        ax = read_word(0x3B); ay = read_word(0x3D); az = read_word(0x3F)
+        gx = read_word(0x43); gy = read_word(0x45); gz = read_word(0x47)
+        magnitude = (ax**2 + ay**2 + az**2) ** 0.5
+        return {
+            "accel_x": ax, "accel_y": ay, "accel_z": az,
+            "gyro_x": gx,  "gyro_y": gy,  "gyro_z": gz,
+            "magnitude": magnitude,
+            "queda": magnitude > QUEDA_THRESHOLD,
+        }
+    except ImportError:
+        return {"accel_x": 0, "accel_y": 0, "accel_z": 16384,
+                "magnitude": 16384, "queda": False, "mock": True}
+    except Exception as e:
+        return {"erro": str(e), "queda": False}
+
+
+# ── MMA — Protocolo de Combate ────────────────────────────────────────────────
+
+_arduino_serial = None
+
+def _get_serial():
+    """Abre conexão serial com Arduino (lazy, singleton)."""
+    global _arduino_serial
+    if _arduino_serial and _arduino_serial.is_open:
+        return _arduino_serial
+    try:
+        import serial
+        _arduino_serial = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=1)
+        time.sleep(2)  # Arduino reinicia ao abrir serial
+        return _arduino_serial
+    except Exception:
+        return None
+
+
+def enviar_mma_arduino(estado: str):
+    """
+    Envia estado MMA ao Arduino via serial.
+    Estados: LIVRE | DEFESA | PATADA_EF | INVESTIDA
+    Arduino lê com Serial.readStringUntil('\\n') e chama a função correspondente.
+    """
+    cmd = f"MMA:{estado}\n"
+    s = _get_serial()
+    if s:
+        try:
+            s.write(cmd.encode())
+            print(f"[AMANDA MMA] → Arduino: {cmd.strip()}")
+        except Exception as e:
+            print(f"[AMANDA MMA] serial erro: {e}")
+    else:
+        print(f"[AMANDA MMA] sem serial — estado: {estado}")
+
+
+# ── DODGE Bridge ──────────────────────────────────────────────────────────────
+
+def notificar_dodge(estado: str, dados: dict | None = None):
+    """
+    Notifica o app DODGE (Quebradinha) sobre estado atual.
+    DODGE muda expressão do avatar conforme o estado.
+    estados: patrulha | alerta | combate | sonho | conselho
+    """
+    try:
+        payload = {"estado": estado, **(dados or {})}
+        requests.post(f"{DODGE_URL}/api/estado", json=payload, timeout=2)
+        print(f"[AMANDA→DODGE] estado: {estado}")
+    except Exception:
+        pass  # DODGE pode estar offline — não bloqueia Amanda
+
+
 # ── Ciclo Principal ───────────────────────────────────────────────────────────
 
 def ciclo_amanda():
@@ -222,13 +314,29 @@ def ciclo_amanda():
                     falar(pensamento)
                     print(f"[AMANDA pensamento] {pensamento}")
 
+        # MPU6050 — detecção de queda/impacto
+        mpu = ler_mpu6050()
+        if mpu.get("queda"):
+            print(f"[AMANDA MPU] Impacto detectado! magnitude={mpu.get('magnitude'):.0f}")
+            enviar_mma_arduino("DEFESA")
+            notificar_dodge("alerta", {"sensor": "mpu6050", "magnitude": mpu.get("magnitude")})
+            pensamento = pensar(
+                "Detectei impacto no chassi. Ativei defesa plastrão. Reaja no estilo Amanda PX."
+            )
+            falar(pensamento)
+            time.sleep(2)  # aguarda manobra completar antes de continuar
+            enviar_mma_arduino("LIVRE")
+            notificar_dodge("patrulha")
+
         # Detecção de som
         if detectar_som():
             print("[AMANDA som] Barulho detectado!")
+            notificar_dodge("alerta", {"sensor": "hw493"})
             pensamento = pensar(
                 "Detectei um som no laboratório. Reaja brevemente, no estilo Amanda PX."
             )
             falar(pensamento)
+            notificar_dodge("patrulha")
 
         time.sleep(0.5)
 
@@ -241,6 +349,7 @@ def ciclo_dream():
             "É hora do sonho de Amanda. Sintetize o que aconteceu no laboratório hoje "
             "em uma frase poética no estilo Amanda PX. Registre como memória."
         )
+        notificar_dodge("sonho")
         sintese = pensar(contexto)
         escrever_memoria(f"[AMANDA-SONHO] {sintese}")
         print(f"[AMANDA sonho] {sintese}")
