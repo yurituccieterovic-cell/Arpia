@@ -37,6 +37,17 @@ DODGE_URL       = os.getenv("DODGE_URL", "http://localhost:8090")  # Quebradinha
 MPU6050_ADDR    = 0x68  # endereço I2C padrão do MPU6050
 QUEDA_THRESHOLD = float(os.getenv("QUEDA_THRESHOLD", "15000"))  # aceleração de impacto
 
+# Canto do Cisne — gestão de energia (gratuito: ADC nativo do Arduino)
+BAT_ALERTA  = float(os.getenv("BAT_ALERTA", "20.0"))   # % — avisar Dodge
+BAT_CRITICA = float(os.getenv("BAT_CRITICA", "10.0"))  # % — iniciar retorno
+BAT_DORMIR  = float(os.getenv("BAT_DORMIR",   "5.0"))  # % — hibernar onde estiver
+
+# Mapeamento 3D — ferramentas gratuitas (OpenCV + ORB features)
+import pathlib
+MAPA_PATH         = pathlib.Path(os.getenv("MAPA_PATH", "/tmp/amanda_mapa.json"))
+DODGE_CAM_URL     = f"{os.getenv('DODGE_URL', 'http://localhost:8090')}/api/camera/frame"
+FRAME_INTERVALO   = float(os.getenv("FRAME_INTERVALO", "5.0"))  # captura a cada Ns
+
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
 def falar(texto: str):
@@ -285,6 +296,137 @@ def notificar_dodge(estado: str, dados: dict | None = None):
         pass  # DODGE pode estar offline — não bloqueia Amanda
 
 
+# ── Protocolo Canto do Cisne (gestão de energia) ─────────────────────────────
+# Hardware gratuito: divisor de tensão (2x resistor 10kΩ na bancada) → pino A0 do Arduino
+# Arduino envia "BAT:xx.x\n" periodicamente via serial quando lê o ADC.
+
+_estado_energia = "OPERACIONAL"   # OPERACIONAL | ALERTA | RETORNO_CRITICO | HIBERNACAO
+_ninho_registrado = False
+
+def registrar_ninho():
+    """Marca posição atual como ninho (chamado no boot ou manualmente)."""
+    global _ninho_registrado
+    _ninho_registrado = True
+    escrever_memoria("[AMANDA-NINHO] Ninho registrado: posição de boot = base segura.")
+    print("[AMANDA ninho] Ninho registrado.")
+
+
+def ler_bateria_serial(linha: str) -> float | None:
+    """Parseia linha 'BAT:xx.x' enviada pelo Arduino via ADC."""
+    if linha.startswith("BAT:"):
+        try:
+            return float(linha[4:].strip())
+        except ValueError:
+            pass
+    return None
+
+
+def _protocolo_cisne_hibernar():
+    """Hibernação imediata — Amanda encosta onde está e dorme."""
+    global _estado_energia
+    _estado_energia = "HIBERNACAO"
+    falar("Energia crítica. Hibernação imediata. Até a próxima caminhada.")
+    enviar_mtd("IDLE")
+    enviar_serial("CISNE:HIBERNAR")     # Arduino recolhe patas, desliga LEDs
+    notificar_dodge("sonho", {"motivo": "hibernacao_emergencia"})
+    escrever_memoria(
+        f"[AMANDA-CISNE] Hibernação emergencial. Bateria esgotada. Mapa salvo: {MAPA_PATH}"
+    )
+
+
+def _protocolo_cisne_retorno():
+    """Retorno crítico ao ninho — Amanda caminha para a base economizando tudo."""
+    global _estado_energia
+    _estado_energia = "RETORNO_CRITICO"
+    falar("Canto do Cisne. Energia crítica. Retornando ao ninho.")
+    enviar_serial("CISNE:RETORNO")      # Arduino ativa modo locomoção mínima
+    enviar_mtd("IDLE")
+    notificar_dodge("sonho", {"motivo": "canto_do_cisne"})
+    escrever_memoria("[AMANDA-CISNE] Protocolo Canto do Cisne ativado. Retornando ao ninho.")
+
+
+def checar_energia(bat_pct: float):
+    """Avalia porcentagem de bateria e transita para o estado correto."""
+    global _estado_energia
+    if bat_pct <= BAT_DORMIR and _estado_energia != "HIBERNACAO":
+        _protocolo_cisne_hibernar()
+    elif bat_pct <= BAT_CRITICA and _estado_energia not in ("RETORNO_CRITICO", "HIBERNACAO"):
+        _protocolo_cisne_retorno()
+    elif bat_pct <= BAT_ALERTA and _estado_energia == "OPERACIONAL":
+        _estado_energia = "ALERTA"
+        notificar_dodge("alerta", {"bateria": bat_pct, "motivo": "bat_baixa"})
+        falar(f"Atenção. Bateria em {bat_pct:.0f} porcento. Procurando ponto de carga.")
+        print(f"[AMANDA bat] ALERTA: {bat_pct:.1f}%")
+    elif bat_pct > BAT_ALERTA and _estado_energia == "ALERTA":
+        _estado_energia = "OPERACIONAL"   # bateria recarregou
+
+
+# ── Mapeamento 3D — Canto do Cisne Espacial (OpenCV + ORB, grátis) ───────────
+# Câmera: DODGE (Quebradinha) expõe GET /api/camera/frame → JPEG
+# Processamento: ORB features (OpenCV) → nós topológicos em JSON local
+# Sonho: Amanda consolida o mapa bruto durante ciclo_dream()
+
+def capturar_frame() -> bytes | None:
+    """Pede frame JPEG ao app DODGE via HTTP local."""
+    try:
+        r = requests.get(DODGE_CAM_URL, timeout=3)
+        if r.ok:
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
+def processar_frame_mapa(frame_bytes: bytes) -> bool:
+    """Extrai features ORB do frame e acrescenta nó ao mapa JSON."""
+    try:
+        import cv2, numpy as np, json as _json
+        nparr = np.frombuffer(frame_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        orb = cv2.ORB_create(nFeatures=150)
+        kp, des = orb.detectAndCompute(img, None)
+        if des is None or len(kp) < 5:
+            return False  # frame sem features úteis
+        mapa = _json.loads(MAPA_PATH.read_text()) if MAPA_PATH.exists() else {"nos": {}}
+        node_id = f"n{len(mapa['nos'])}"
+        mapa["nos"][node_id] = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "features": len(kp),
+            "des_shape": list(des.shape),  # salvar shape; descritores completos seriam grandes
+        }
+        MAPA_PATH.write_text(_json.dumps(mapa, indent=2))
+        print(f"[AMANDA mapa] nó {node_id}: {len(kp)} features")
+        return True
+    except ImportError:
+        print("[AMANDA mapa] OpenCV não instalado — pip install opencv-python numpy")
+    except Exception as e:
+        print(f"[AMANDA mapa] erro: {e}")
+    return False
+
+
+def sonho_consolidar_mapa():
+    """
+    Processamento offline do mapa — chamado no ciclo_dream().
+    Remove nós com poucos features (ruído), gera resumo e salva.
+    """
+    import json as _json
+    if not MAPA_PATH.exists():
+        return
+    mapa = _json.loads(MAPA_PATH.read_text())
+    nos = mapa.get("nos", {})
+    nos_limpos = {k: v for k, v in nos.items() if v.get("features", 0) >= 8}
+    removidos = len(nos) - len(nos_limpos)
+    mapa["nos"] = nos_limpos
+    mapa["ultima_consolidacao"] = datetime.now(timezone.utc).isoformat()
+    mapa["total_nos"] = len(nos_limpos)
+    mapa["nos_removidos_no_sonho"] = removidos
+    MAPA_PATH.write_text(_json.dumps(mapa, indent=2))
+    resumo = f"Mapa consolidado: {len(nos_limpos)} nós limpos ({removidos} ruídos removidos)."
+    escrever_memoria(f"[AMANDA-SONHO-MAPA] {resumo}")
+    print(f"[AMANDA sonho-mapa] {resumo}")
+    return mapa
+
+
 # ── Ciclo Principal ───────────────────────────────────────────────────────────
 
 def ciclo_amanda():
@@ -294,9 +436,11 @@ def ciclo_amanda():
 
     ultimo_heartbeat  = 0
     ultima_leitura    = 0
-    ultimo_som        = 0.0   # timestamp do último som detectado
-    SOM_ALERTA_SECS   = 10.0  # janela de alerta após som antes de voltar a IDLE
+    ultimo_som        = 0.0
+    SOM_ALERTA_SECS   = 10.0
+    ultimo_frame      = 0.0   # captura de mapa a cada FRAME_INTERVALO
 
+    registrar_ninho()
     enviar_mtd("IDLE")  # começa economizando
 
     while True:
@@ -363,6 +507,28 @@ def ciclo_amanda():
             enviar_mtd("IDLE")
             ultimo_som = 0.0
 
+        # Leitura de bateria via serial Arduino (ADC gratuito)
+        s = _get_serial()
+        if s and s.in_waiting:
+            try:
+                linha = s.readline().decode(errors="ignore").strip()
+                bat = ler_bateria_serial(linha)
+                if bat is not None:
+                    print(f"[AMANDA bat] {bat:.1f}%")
+                    checar_energia(bat)
+                    if _estado_energia in ("RETORNO_CRITICO", "HIBERNACAO"):
+                        time.sleep(0.5)
+                        continue  # interrompe ciclo normal durante retorno/hibernação
+            except Exception:
+                pass
+
+        # Captura de frame para mapeamento (só quando operacional)
+        if _estado_energia == "OPERACIONAL" and (agora - ultimo_frame) >= FRAME_INTERVALO:
+            frame = capturar_frame()
+            if frame:
+                processar_frame_mapa(frame)
+            ultimo_frame = agora
+
         time.sleep(0.5)
 
 
@@ -375,6 +541,7 @@ def ciclo_dream():
             "em uma frase poética no estilo Amanda PX. Registre como memória."
         )
         notificar_dodge("sonho")
+        sonho_consolidar_mapa()   # consolida mapa 3D durante o sonho
         sintese = pensar(contexto)
         escrever_memoria(f"[AMANDA-SONHO] {sintese}")
         print(f"[AMANDA sonho] {sintese}")
