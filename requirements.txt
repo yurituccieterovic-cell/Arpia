@@ -20,3 +20,6 @@ google-adk>=1.0.0
 crewai>=0.80.0
 crewai-tools>=0.14.0
 litellm>=1.40.0
+# OpenAI — Hestia (GPT-4o provisório 3 meses)
+openai>=1.58.0
+openai-agents>=0.0.9
