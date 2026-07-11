@@ -37,6 +37,10 @@ DODGE_URL       = os.getenv("DODGE_URL", "http://localhost:8090")  # Quebradinha
 MPU6050_ADDR    = 0x68  # endereço I2C padrão do MPU6050
 QUEDA_THRESHOLD = float(os.getenv("QUEDA_THRESHOLD", "15000"))  # aceleração de impacto
 
+# PAP API (Railway) — para comandar MEKY e ler memória ISA
+PAP_API_URL  = os.getenv("PAP_API_URL", "https://site-st-production.up.railway.app")
+MEKY_TOKEN   = os.getenv("MEKY_TOKEN", "")     # mesmo token que o robô MEKY usa
+
 # Canto do Cisne — gestão de energia (gratuito: ADC nativo do Arduino)
 BAT_ALERTA  = float(os.getenv("BAT_ALERTA", "20.0"))   # % — avisar Dodge
 BAT_CRITICA = float(os.getenv("BAT_CRITICA", "10.0"))  # % — iniciar retorno
@@ -296,6 +300,141 @@ def notificar_dodge(estado: str, dados: dict | None = None):
         pass  # DODGE pode estar offline — não bloqueia Amanda
 
 
+# ── MEKY Bridge — Amanda conectada a todas as funcionalidades da MEKY ─────────
+
+# Mapeamento: evento Amanda → face_id MEKY
+# IDs baseados nos 140 estados definidos no firmware (Sessão 47b)
+_MEKY_FACES = {
+    # Ciclo operacional
+    "idle":            1,   # neutro/patrulha
+    "ativo":           7,   # Criar — freq 2.0Hz LED dourado
+    "alerta_som":     21,   # Detecção — boca larga
+    "impacto":        52,   # Alarme — amplitude máx
+    "defesa":         54,   # Postura defensiva
+    "calor_alto":     33,   # Temperatura alta — onda irregular
+    "calor_baixo":     1,   # Temperatura normal
+    "umidade_alta":   34,   # Umidade — onda lenta
+    "bateria_baixa":  62,   # Alerta energia — pulso rápido
+    "hibernacao":     90,   # Dormir — amplitude zero
+    "sonho":          95,   # Sonho — seno suave lento
+    "retorno":        37,   # Retorno ao ninho
+    # Cognitivo / assembleia
+    "pensamento":     71,   # Filosofico — onda cosseno lenta
+    "comunicando":    80,   # Social — padrão diálogo
+    "conselho":       85,   # Assembleia — múltiplas frequências
+    "assinatura":    140,   # MEKY Signature — 0.7amp 1.3Hz +33°
+}
+
+_ultimo_comando_meky = 0.0
+_MEKY_CMD_THROTTLE  = 3.0   # mínimo 3s entre comandos para não spam
+
+
+def ler_status_meky() -> dict:
+    """Lê estado atual da MEKY via PAP API (GET /api/meky/status)."""
+    try:
+        r = requests.get(
+            f"{PAP_API_URL}/api/meky/status",
+            headers={"x-meky-token": MEKY_TOKEN},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {}
+
+
+def enviar_comando_meky(tipo: str, params: dict | None = None):
+    """
+    Envia comando à fila de controle da MEKY via PAP API.
+    tipo: 'face' | 'amplitude' | 'frequencia' | 'led' | 'idle'
+    params: {'face_id': 52} ou {'amplitude': 0.9, 'freq': 2.0}
+    Amanda usa MEKY_TOKEN para autenticar como agente confiável.
+    """
+    global _ultimo_comando_meky
+    agora = time.time()
+    if agora - _ultimo_comando_meky < _MEKY_CMD_THROTTLE:
+        return  # throttle — evita spam de comandos
+
+    payload = {"tipo": tipo, **(params or {}), "origem": "amanda"}
+    try:
+        r = requests.post(
+            f"{PAP_API_URL}/api/meky/command",
+            json=payload,
+            headers={
+                "x-meky-token": MEKY_TOKEN,
+                "Content-Type": "application/json",
+            },
+            timeout=5,
+        )
+        if r.status_code in (200, 201):
+            _ultimo_comando_meky = agora
+            print(f"[AMANDA→MEKY] comando enviado: {tipo} {params}")
+        else:
+            print(f"[AMANDA→MEKY] erro HTTP {r.status_code}")
+    except Exception as e:
+        print(f"[AMANDA→MEKY] falha de rede: {e}")
+
+
+def meky_expressar(evento: str, extra: dict | None = None):
+    """Traduz evento de Amanda para expressão de face MEKY."""
+    face_id = _MEKY_FACES.get(evento, _MEKY_FACES["idle"])
+    enviar_comando_meky("face", {"face_id": face_id, **(extra or {})})
+
+
+def meky_temperatura(temp: float, umidade: float):
+    """Mapeia leitura DHT11 para expressão MEKY de temperatura/umidade."""
+    if temp >= 35:
+        meky_expressar("calor_alto", {"intensidade": "critico"})
+    elif temp >= 30:
+        meky_expressar("calor_alto")
+    elif umidade >= 85:
+        meky_expressar("umidade_alta")
+    else:
+        meky_expressar("idle")
+
+
+def meky_ler_memoria() -> list[dict]:
+    """Lê memórias recentes da MEKY via PAP API."""
+    try:
+        r = requests.get(
+            f"{PAP_API_URL}/api/meky/memory?limit=5",
+            headers={"x-meky-token": MEKY_TOKEN},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json().get("memories", [])
+    except Exception:
+        pass
+    return []
+
+
+def meky_registrar_evento(tipo: str, descricao: str):
+    """Registra evento crítico na timeline da MEKY."""
+    try:
+        requests.post(
+            f"{PAP_API_URL}/api/meky/event",
+            json={"tipo": tipo, "descricao": descricao, "origem": "amanda"},
+            headers={"x-meky-token": MEKY_TOKEN, "Content-Type": "application/json"},
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def meky_sonho_integrado():
+    """Amanda lê sonhos da MEKY e os incorpora na própria memória ISA."""
+    memorias = meky_ler_memoria()
+    if not memorias:
+        return
+    resumo = "; ".join(m.get("conteudo", "")[:80] for m in memorias[:3])
+    if resumo:
+        escrever_memoria(
+            f"[AMANDA←MEKY sonho] Memórias recentes da MEKY absorvidas: {resumo}"
+        )
+        print(f"[AMANDA←MEKY] {len(memorias)} memória(s) integradas")
+
+
 # ── Protocolo Canto do Cisne (gestão de energia) ─────────────────────────────
 # Hardware gratuito: divisor de tensão (2x resistor 10kΩ na bancada) → pino A0 do Arduino
 # Arduino envia "BAT:xx.x\n" periodicamente via serial quando lê o ADC.
@@ -467,6 +606,8 @@ def ciclo_amanda():
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "fonte": "amanda-dht11",
                 })
+                # Espelhar temperatura na expressão da MEKY
+                meky_temperatura(dados["temperatura"], dados.get("umidade", 0))
 
                 # A cada 10 leituras: pensar sobre os dados
                 if round(agora) % 20 == 0:
@@ -479,24 +620,28 @@ def ciclo_amanda():
                     falar(pensamento)
                     print(f"[AMANDA pensamento] {pensamento}")
 
-        # MPU6050 — detecção de queda/impacto → ATTACK + DEFESA
+        # MPU6050 — detecção de queda/impacto → ATTACK + DEFESA + MEKY alarme
         mpu = ler_mpu6050()
         if mpu.get("queda"):
             print(f"[AMANDA MPU] Impacto! magnitude={mpu.get('magnitude', 0):.0f}")
             enviar_mtd("ATTACK")
             enviar_mma_arduino("DEFESA")
+            meky_expressar("impacto")                             # MEKY → face alarme
+            meky_registrar_evento("impacto", f"magnitude={mpu.get('magnitude',0):.0f}")
             pensamento = pensar(
                 "Detectei impacto no chassi. Ativei defesa plastrão. Reaja no estilo Amanda PX."
             )
             falar(pensamento)
             time.sleep(2)  # aguarda manobra completar
             enviar_mtd("IDLE")
+            meky_expressar("defesa")
 
-        # Detecção de som → DEFENSE por janela de alerta
+        # Detecção de som → DEFENSE + MEKY alerta
         if detectar_som():
             print("[AMANDA som] Barulho detectado!")
             ultimo_som = agora
             enviar_mtd("DEFENSE")
+            meky_expressar("alerta_som")                          # MEKY → boca larga alerta
             pensamento = pensar(
                 "Detectei um som no laboratório. Reaja brevemente, no estilo Amanda PX."
             )
@@ -505,6 +650,7 @@ def ciclo_amanda():
         # Volta para IDLE após janela de alerta sem novos sons
         if ultimo_som > 0 and (agora - ultimo_som) >= SOM_ALERTA_SECS:
             enviar_mtd("IDLE")
+            meky_expressar("idle")
             ultimo_som = 0.0
 
         # Leitura de bateria via serial Arduino (ADC gratuito)
@@ -533,18 +679,29 @@ def ciclo_amanda():
 
 
 def ciclo_dream():
-    """Amanda sonha periodicamente — síntese do dia e registro na memória ISA."""
+    """Amanda sonha periodicamente — síntese do dia, mapa 3D e integração com MEKY."""
     while True:
         time.sleep(3600 * 3)  # a cada 3h
+
+        # Entrar em modo sonho: MEKY também dorme junto
+        notificar_dodge("sonho")
+        meky_expressar("sonho")                      # MEKY → seno suave lento
+
+        sonho_consolidar_mapa()                      # consolida mapa 3D durante o sonho
+
+        # Absorver memórias da MEKY antes de sintetizar o sonho de Amanda
+        meky_sonho_integrado()
+
         contexto = (
             "É hora do sonho de Amanda. Sintetize o que aconteceu no laboratório hoje "
             "em uma frase poética no estilo Amanda PX. Registre como memória."
         )
-        notificar_dodge("sonho")
-        sonho_consolidar_mapa()   # consolida mapa 3D durante o sonho
         sintese = pensar(contexto)
         escrever_memoria(f"[AMANDA-SONHO] {sintese}")
         print(f"[AMANDA sonho] {sintese}")
+
+        # Acordar MEKY após sonho
+        meky_expressar("idle")
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
