@@ -71,16 +71,32 @@ PAP_API_URL = "https://site-st-production.up.railway.app"
 
 
 async def fetch_ecosystem_memory(limit: int = 10) -> list[dict]:
-    """Busca memórias recentes do Playcenter (endpoint público do PAP)."""
+    """Busca memórias recentes do Ecosistema (endpoint público PAP) + Playcenter como fallback."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{PAP_API_URL}/api/assembly/playcenter")
+            # Primeira opção: ecosistema_memory unificada
+            resp = await client.get(f"{PAP_API_URL}/api/ecosistema/memoria/latest?limit={limit}")
             if resp.status_code == 200:
                 data = resp.json()
-                msgs = data.get("messages", data) if isinstance(data, dict) else data
+                mems = data.get("memories", [])
+                if mems:
+                    return [
+                        {
+                            "agente": m.get("authorIa", "?"),
+                            "tipo": m.get("type", "conversa"),
+                            "conteudo": m.get("content", "")[:200],
+                            "signo": m.get("signo"),
+                        }
+                        for m in mems
+                    ]
+            # Fallback: Playcenter
+            resp2 = await client.get(f"{PAP_API_URL}/api/assembly/playcenter")
+            if resp2.status_code == 200:
+                data2 = resp2.json()
+                msgs = data2.get("messages", data2) if isinstance(data2, dict) else data2
                 if isinstance(msgs, list):
                     return [
-                        {"agente": m.get("fromAgent", "?"), "conteudo": m.get("content", "")[:200]}
+                        {"agente": m.get("fromAgent", "?"), "tipo": "playcenter", "conteudo": m.get("content", "")[:200]}
                         for m in msgs[-limit:]
                     ]
     except Exception:

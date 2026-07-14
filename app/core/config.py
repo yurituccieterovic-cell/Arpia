@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     meky_vision_socket: str = "/tmp/meky-vision.sock"
     inat_token:         str = ""   # iNaturalist OAuth token (eco-logging)
 
+    # ── PAP Ecosistema (memória unificada) ───────────────────────────────────
+    db_api_key: str = ""   # X-PAP-Key para POST /api/ecosistema/memoria/save
+
     # ── Rate limits ──────────────────────────────────────────────────────────
     rate_limit_chat_per_min: int = 20
     rate_limit_auth_per_min: int = 5

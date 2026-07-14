@@ -207,23 +207,28 @@ async def memory_save(
     db.add(log)
     await db.commit()
 
-    # Tenta replicar no Conector PAP se tiver BRIDGE_SECRET
+    # Replicar no Ecosistema unificado via /api/ecosistema/memoria/save (usa DB_API_KEY)
     pap_ok = False
-    bridge = getattr(cfg, "pap_bridge_secret", "") or ""
-    if bridge:
+    db_api_key = getattr(cfg, "db_api_key", "") or ""
+    if db_api_key:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                entry = f"### {datetime.utcnow().strftime('%Y-%m-%d')} — {agent.id}\n- {req.insight}"
                 r = await client.post(
-                    f"{PAP_API_URL}/api/conector/memory",
-                    headers={"Authorization": f"Bearer {bridge}", "Content-Type": "application/json"},
-                    json={"section": "conversas", "append": entry},
+                    f"{PAP_API_URL}/api/ecosistema/memoria/save",
+                    headers={"X-PAP-Key": db_api_key, "Content-Type": "application/json"},
+                    json={
+                        "author_ia": agent.id,
+                        "type": "conversa",
+                        "content": req.insight,
+                        "tags": req.tags,
+                        "importance": 5,
+                    },
                 )
                 pap_ok = r.status_code == 200
         except Exception:
             pass
 
-    return {"ok": True, "saved_locally": True, "replicated_pap": pap_ok}
+    return {"ok": True, "saved_locally": True, "replicated_ecosistema": pap_ok}
 
 
 @router.post("/audit/log")
