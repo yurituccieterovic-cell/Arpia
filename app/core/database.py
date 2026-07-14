@@ -55,6 +55,7 @@ async def get_db():
 async def init_db():
     """Cria tabelas na inicialização (dev) — em prod usar Alembic migrations."""
     from app.models import user, message, peirce, clube  # noqa: importa para registrar no metadata
+    from app.models import arpia_agent  # noqa: arpia_agents + arpia_audit_log
     async with engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

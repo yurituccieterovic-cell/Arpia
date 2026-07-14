@@ -11,7 +11,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from app.core.config import get_settings
 from app.core.database import init_db, close_db
-from app.routes import health, auth, chat, clube, semiotics, tasks, view, hardware, mc, governance, fractal, agents, conselho, crew2, hestia
+from app.routes import health, auth, chat, clube, semiotics, tasks, view, hardware, mc, governance, fractal, agents, conselho, crew2, hestia, arpia
 
 
 @asynccontextmanager
@@ -58,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(conselho.router)
     app.include_router(crew2.router)
     app.include_router(hestia.router, prefix="/api")
+    app.include_router(arpia.router)
 
     @app.get("/")
     async def root():
