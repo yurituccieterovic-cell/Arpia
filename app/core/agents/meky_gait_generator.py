@@ -1,12 +1,17 @@
 """
-MEKY Gait Generator — Ponte Amanda↔Hardware (Sessões #564/#565)
+MEKY Gait Generator — Ponte Amanda↔Hardware (Sessões #564/#565, corr. #566)
 
 Princípio: criar a ponte mesmo se a interface física ainda não existe.
 Quando o escorpião hardware chegar, este módulo já sabe conversar com ele.
 
-Gaits canônicos derivados da Assembleia RODAR #564:
-  5 gaits base + tabela paramétrica → cobrem 80-90% do repertório real
-  Struct GaitSpec → no Arduino: PROGMEM; aqui: dataclass Python
+CORREÇÃO #566: MEKY é um QUADRÚPEDE (4 patas), NÃO hexápode.
+  Firmware: RegisHsu Arduino Spider Robot (12 servos, 4 patas × 3 servos)
+  Pins: {2,3,4}, {5,6,7}, {8,9,10}, {11,12,13}
+  Serial: 115200 baud
+  Protocolo serial direto: ver meky_scorpio_bridge.py
+
+Gaits aqui são abstrações para FIRMWARE CUSTOMIZADO FUTURO.
+Para controle imediato do firmware RegisHsu: usar MekyScorpioBridge.
 """
 
 from dataclasses import dataclass, field
@@ -21,57 +26,59 @@ import asyncio
 @dataclass
 class GaitSpec:
     """
-    6 parâmetros que definem qualquer marcha hexápode.
-    No firmware Arduino esses valores vão para PROGMEM (flash), liberando SRAM.
+    6 parâmetros que definem qualquer marcha quadrúpede.
+    phase_offset: 4 elementos (uma fase por pata) — MEKY tem 4 patas.
+    Ordem das patas: [LF, RF, LB, RB] (esquerda-frente, direita-frente, esq-trás, dir-trás)
     """
     name: str
-    phase_offset: list[float]   # fases relativas de cada pata (0.0–1.0), len=6
+    phase_offset: list[float]   # fases relativas de cada pata (0.0–1.0), len=4
     duty_cycle: float           # razão tempo-apoio/período (0.0–1.0)
     step_amplitude_mm: float    # altura máxima do passo em mm
     freq_hz: float              # frequência do ciclo completo
     body_height_mm: float       # altura do chassi acima do solo
-    sync_pattern: str           # "tripod" | "wave" | "ripple" | "lateral" | "pivot"
-    terrain: str = "plano"      # terreno ideal
-    risk: str = "baixo"         # baixo | médio | alto
-    bio_inspiration: str = ""   # espécie/comportamento de referência
+    sync_pattern: str           # "trot" | "walk" | "pace" | "lateral" | "pivot"
+    terrain: str = "plano"
+    risk: str = "baixo"
+    bio_inspiration: str = ""
     notes: str = ""
 
 
-# ── 5 Gaits Canônicos (Assembleia #564) ─────────────────────────────────────
+# ── 5 Gaits Canônicos (Quadrúpede — corr. #566) ─────────────────────────────
+# Ordem patas: [LF, RF, LB, RB]
 
 GAITS: dict[str, GaitSpec] = {
 
-    "tripod": GaitSpec(
-        name="Trípode Alternado",
-        phase_offset=[0.0, 0.5, 0.0, 0.5, 0.0, 0.5],  # patas 1,3,5 juntas; 2,4,6 juntas
+    "trot": GaitSpec(
+        name="Trote Diagonal",
+        phase_offset=[0.0, 0.5, 0.5, 0.0],  # LF+RB juntas; RF+LB juntas
         duty_cycle=0.5,
         step_amplitude_mm=30.0,
         freq_hz=1.5,
         body_height_mm=60.0,
-        sync_pattern="tripod",
+        sync_pattern="trot",
         terrain="plano",
         risk="baixo",
-        bio_inspiration="Insetos rápidos (Blaberus, Periplaneta)",
-        notes="Velocidade máxima em piso plano. Estabilidade estática garantida.",
+        bio_inspiration="Cão, cavalo (pares diagonais sincronizados)",
+        notes="Velocidade máxima em piso plano. Estabilidade estática garantida por pares diagonais.",
     ),
 
-    "wave": GaitSpec(
-        name="Onda Metacrônica",
-        phase_offset=[0.0, 1/6, 2/6, 3/6, 4/6, 5/6],
+    "walk": GaitSpec(
+        name="Caminhada Sequencial",
+        phase_offset=[0.0, 0.25, 0.5, 0.75],  # cada pata 90° defasada
         duty_cycle=0.75,
         step_amplitude_mm=25.0,
         freq_hz=0.8,
         body_height_mm=50.0,
-        sync_pattern="wave",
+        sync_pattern="walk",
         terrain="irregular",
         risk="baixo",
-        bio_inspiration="Centopeia (Scolopendra), Piolho-de-cobra (Diplópode)",
-        notes="Terreno irregular; só 1 pata no ar por vez — máxima estabilidade.",
+        bio_inspiration="Lagarto (Lacertidae), tartaruga — pata por pata",
+        notes="Terreno irregular; máxima estabilidade. Sempre 3 patas no chão.",
     ),
 
     "ripple": GaitSpec(
-        name="Ripple — Onda Média",
-        phase_offset=[0.0, 1/3, 2/3, 0.5, 5/6, 1/6],
+        name="Ripple — Onda Alternada",
+        phase_offset=[0.0, 0.5, 0.33, 0.83],  # 2 patas no ar em sequência cruzada
         duty_cycle=0.67,
         step_amplitude_mm=28.0,
         freq_hz=1.0,
@@ -79,13 +86,13 @@ GAITS: dict[str, GaitSpec] = {
         sync_pattern="ripple",
         terrain="semi-irregular",
         risk="baixo",
-        bio_inspiration="Barata (Blattodea) em solo misto",
-        notes="Equilíbrio entre velocidade e estabilidade. 2 patas no ar.",
+        bio_inspiration="Gato em terreno irregular (adaptação de 4 patas)",
+        notes="Equilíbrio entre velocidade e estabilidade. 2 patas no ar com overlap.",
     ),
 
     "side_step": GaitSpec(
-        name="Passo Lateral — Sidewinder",
-        phase_offset=[0.0, 0.5, 0.0, 0.5, 0.0, 0.5],
+        name="Passo Lateral",
+        phase_offset=[0.0, 0.5, 0.0, 0.5],  # pares laterais: LF+LB vs RF+RB
         duty_cycle=0.5,
         step_amplitude_mm=20.0,
         freq_hz=1.2,
@@ -93,13 +100,13 @@ GAITS: dict[str, GaitSpec] = {
         sync_pattern="lateral",
         terrain="plano",
         risk="baixo",
-        bio_inspiration="Aranha-caranguejo (Thomisidae), Siri (Ocypode)",
+        bio_inspiration="Siri (Ocypode), aranha-caranguejo (Thomisidae)",
         notes="Deslocamento 100% lateral sem rotação do chassi.",
     ),
 
     "pivot": GaitSpec(
         name="Giro em Pivô",
-        phase_offset=[0.0, 0.5, 0.0, 0.5, 0.0, 0.5],
+        phase_offset=[0.0, 0.5, 0.5, 0.0],  # patas esq. para frente, dir. para trás
         duty_cycle=0.5,
         step_amplitude_mm=15.0,
         freq_hz=1.0,
@@ -107,8 +114,8 @@ GAITS: dict[str, GaitSpec] = {
         sync_pattern="pivot",
         terrain="plano",
         risk="baixo",
-        bio_inspiration="Besouro (Coleoptera) — giro sobre próprio eixo",
-        notes="Patas esq. para frente, dir. para trás. Giro 360° no próprio eixo.",
+        bio_inspiration="Escorpião — giro sobre próprio eixo",
+        notes="LF+LB recuam; RF+RB avançam. Giro 360° no próprio eixo.",
     ),
 }
 
@@ -124,20 +131,19 @@ def gait_variant(base: GaitSpec, **overrides) -> GaitSpec:
     return g
 
 
-# Exemplos de variantes derivadas dos gaits canônicos:
 GAIT_VARIANTS: dict[str, GaitSpec] = {
-    "tripod_traction": gait_variant(
-        GAITS["tripod"], name="Trípode Tração (Carreta)",
+    "trot_traction": gait_variant(
+        GAITS["trot"], name="Trote Tração (Rampa)",
         duty_cycle=0.75, freq_hz=0.6, body_height_mm=45.0,
-        terrain="rampa", notes="Baixo chassi + duty alto = tração máxima."
+        terrain="rampa", notes="Baixo chassi + duty alto = tração máxima em subida."
     ),
-    "wave_mud": gait_variant(
-        GAITS["wave"], name="Onda Lama",
+    "walk_mud": gait_variant(
+        GAITS["walk"], name="Caminhada Lama",
         step_amplitude_mm=50.0, freq_hz=0.5,
         terrain="lama", notes="Passo alto para não criar vácuo na lama."
     ),
     "stealth": gait_variant(
-        GAITS["wave"], name="Furtivo",
+        GAITS["walk"], name="Furtivo",
         freq_hz=0.2, step_amplitude_mm=15.0, body_height_mm=40.0,
         terrain="qualquer", notes="10% da velocidade normal. Ruído mínimo."
     ),
@@ -146,13 +152,13 @@ GAIT_VARIANTS: dict[str, GaitSpec] = {
         body_height_mm=20.0, step_amplitude_mm=10.0,
         terrain="passagem_baixa", notes="Casco rente ao chão para frestas < 8 cm."
     ),
-    "pentapod_tractor": GaitSpec(
-        name="Onda Pentápode Trator",
-        phase_offset=[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],  # só 1 pata no ar
+    "tripod_stance": GaitSpec(
+        name="Postura Trípode (Carga)",
+        phase_offset=[0.0, 0.0, 1.0, 0.0],  # só 1 pata no ar
         duty_cycle=0.9, step_amplitude_mm=20.0, freq_hz=0.4,
-        body_height_mm=40.0, sync_pattern="wave",
+        body_height_mm=40.0, sync_pattern="walk",
         terrain="rampa_extrema", risk="médio",
-        notes="5 patas no chão, 1 no ar. Torque máximo. Para puxar carga pesada.",
+        notes="3 patas no chão, 1 no ar. Torque máximo. Para puxar carga pesada.",
     ),
 }
 
@@ -161,16 +167,17 @@ GAIT_VARIANTS: dict[str, GaitSpec] = {
 
 class MekyGaitCommander:
     """
-    Amanda chama este objeto para comandar marchas à MEKY.
+    Amanda chama este objeto para comandar marchas à MEKY (firmware customizado futuro).
 
-    Quando hardware não existe: comandos ficam em fila (dry_run=True).
-    Quando hardware chega: setar serial_port ou ws_url e dry_run=False.
+    Para o firmware RegisHsu atual: usar meky_scorpio_bridge.MekyScorpioBridge.
+
+    dry_run=True: comandos ficam em fila até hardware customizado chegar.
     """
 
     def __init__(
         self,
-        serial_port: Optional[str] = None,   # ex: "/dev/ttyUSB0"
-        ws_url: Optional[str] = None,         # ex: "ws://meky.local:81/ws"
+        serial_port: Optional[str] = None,
+        ws_url: Optional[str] = None,
         dry_run: bool = True,
     ):
         self.serial_port = serial_port
@@ -202,12 +209,10 @@ class MekyGaitCommander:
         cmd = self._build_command(gait, speed_pct)
 
         if self.dry_run:
-            # Ponte preparada: hardware não chegou ainda, mas o comando está pronto
             self._queue.append(cmd)
             print(f"[MEKY-GAIT dry_run] {gait.name} @ {speed_pct}% velocidade")
             return {"ok": True, "dry_run": True, "queued": cmd}
 
-        # Hardware disponível → enviar via serial ou WebSocket
         if self.serial_port:
             return await self._send_serial(cmd)
         elif self.ws_url:
@@ -246,7 +251,6 @@ class MekyGaitCommander:
             return {"ok": False, "error": str(e)}
 
     def flush_queue(self) -> list[dict]:
-        """Retorna todos os comandos acumulados em dry_run."""
         q = list(self._queue)
         self._queue.clear()
         return q
@@ -255,5 +259,5 @@ class MekyGaitCommander:
         return list(GAITS.keys()) + list(GAIT_VARIANTS.keys())
 
 
-# Singleton — Amanda usa este objeto
+# Singleton — Amanda usa este objeto (firmware customizado futuro)
 meky_gait = MekyGaitCommander(dry_run=True)

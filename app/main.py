@@ -4,6 +4,7 @@ Conecta: Manga (PostgreSQL) | Socoboy (Telegram bot) | PAP Site | MEKY
 
 Deploy: Railway → Procfile web process
 """
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,14 +12,18 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from app.core.config import get_settings
 from app.core.database import init_db, close_db
-from app.routes import health, auth, chat, clube, semiotics, tasks, view, hardware, mc, governance, fractal, agents, conselho, crew2, hestia, arpia
+from app.routes import health, auth, chat, clube, semiotics, tasks, view, hardware, mc, governance, fractal, agents, conselho, crew2, hestia, arpia, animador as animador_route
+from app.agents.animador import iniciar_loop, parar_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = get_settings()
     await init_db()
+    animador_task = asyncio.create_task(iniciar_loop())
     yield
+    parar_loop()
+    animador_task.cancel()
     await close_db()
 
 
@@ -59,6 +64,7 @@ def create_app() -> FastAPI:
     app.include_router(crew2.router)
     app.include_router(hestia.router, prefix="/api")
     app.include_router(arpia.router)
+    app.include_router(animador_route.router)
 
     @app.get("/")
     async def root():
