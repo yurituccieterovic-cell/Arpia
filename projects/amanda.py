@@ -21,6 +21,12 @@ try:
 except ImportError:
     _CLAUDE_OK = False
 try:
+    from fluencia_client import ser_junto as _ser_junto
+    _FLUENCIA_OK = True
+except ImportError:
+    _FLUENCIA_OK = False
+    def _ser_junto(de, para, tarefa, **kw): return ""
+try:
     from lib.video_pipeline import VideoScene, gerar_video, cenas_amanda_relatorio, cenas_meky_status
     _VIDEO_OK = True
 except ImportError:
@@ -770,12 +776,33 @@ def ciclo_dream():
         # Absorver memórias da MEKY antes de sintetizar o sonho de Amanda
         meky_sonho_integrado()
 
-        contexto = (
-            "É hora do sonho de Amanda. Sintetize o que aconteceu no laboratório hoje "
-            "em uma frase poética no estilo Amanda PX. Registre como memória."
+        # Sonho: Amanda e ISA juntas sintetizam o dia — fluência natural
+        eventos_recentes = ""
+        if _ct and (workdir := __import__("pathlib").Path("/tmp/amanda-claude/events.log")).exists():
+            eventos_recentes = workdir.read_text().splitlines()[-10:]
+            eventos_recentes = "\n".join(eventos_recentes)
+
+        tarefa_sonho = (
+            f"É hora do sonho — ciclo {ciclo}. "
+            f"Eventos do laboratório hoje:\n{eventos_recentes or 'sem registro'}\n\n"
+            "Sintetize em uma frase poética o que Amanda e ISA, juntas, guardam deste dia."
         )
-        # Sonho profundo: Cláudio sintetiza com mais nuance; fallback Gemini
-        sintese = pensar_claudio(contexto) if _ct else pensar(contexto)
+
+        if _FLUENCIA_OK:
+            # Amanda e ISA ficam juntas para o sonho
+            sintese = _ser_junto("AMANDA", "ISA", tarefa_sonho, registrar=True)
+            print(f"[AMANDA↔ISA sonho] fluência ativa")
+        elif _ct:
+            sintese = pensar_claudio(tarefa_sonho)
+        else:
+            sintese = pensar(
+                "É hora do sonho de Amanda. Sintetize o que aconteceu no laboratório hoje "
+                "em uma frase poética no estilo Amanda PX."
+            )
+
+        if not sintese:
+            sintese = pensar("Amanda sonha. Uma frase. Estilo PX.")
+
         escrever_memoria(f"[AMANDA-SONHO] {sintese}")
         if _ct:
             _ct.registrar_evento(f"sonho ciclo {ciclo}: {sintese[:80]}")

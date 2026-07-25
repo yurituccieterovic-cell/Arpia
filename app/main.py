@@ -12,7 +12,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from app.core.config import get_settings
 from app.core.database import init_db, close_db
-from app.routes import health, auth, chat, clube, semiotics, tasks, view, hardware, mc, governance, fractal, agents, conselho, crew2, hestia, arpia, animador as animador_route
+from app.routes import health, auth, chat, clube, semiotics, tasks, view, hardware, mc, governance, fractal, agents, conselho, crew2, hestia, arpia, animador as animador_route, fluencia as fluencia_route
 from app.agents.animador import iniciar_loop, parar_loop
 
 
@@ -65,6 +65,7 @@ def create_app() -> FastAPI:
     app.include_router(hestia.router, prefix="/api")
     app.include_router(arpia.router)
     app.include_router(animador_route.router)
+    app.include_router(fluencia_route.router)
 
     @app.get("/")
     async def root():
