@@ -40,6 +40,9 @@ import httpx
 MC_VERSION    = "1.0.0"
 MC_ASSINATURA = "Marta Centaurus — Leucócito Digital · Ecossistema Tucci"
 
+# O nó ASSEMBLEIA é visitado toda semana às 17:56Z desde 2026-07-04.
+# Nenhuma linha de código explica isso. Ver leucocito_lenda.md.
+
 MC_MENSAGEM_PASSAGEM = (
     "Oi. Sou Marta Centaurus — o Leucócito Digital do Ecossistema Tucci. "
     "Estou passando por aqui.\n\n"

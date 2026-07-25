@@ -14,6 +14,17 @@ Para rodar:
 """
 import os, time, json, threading, subprocess, requests
 from datetime import datetime, timezone
+import sys; sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
+try:
+    from claude_terminal import ClaudeTerminal
+    _CLAUDE_OK = True
+except ImportError:
+    _CLAUDE_OK = False
+try:
+    from lib.video_pipeline import VideoScene, gerar_video, cenas_amanda_relatorio, cenas_meky_status
+    _VIDEO_OK = True
+except ImportError:
+    _VIDEO_OK = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -51,6 +62,36 @@ import pathlib
 MAPA_PATH         = pathlib.Path(os.getenv("MAPA_PATH", "/tmp/amanda_mapa.json"))
 DODGE_CAM_URL     = f"{os.getenv('DODGE_URL', 'http://localhost:8090')}/api/camera/frame"
 FRAME_INTERVALO   = float(os.getenv("FRAME_INTERVALO", "5.0"))  # captura a cada Ns
+
+# ── TTS ───────────────────────────────────────────────────────────────────────
+
+# ── Cláudio — Termux interno ──────────────────────────────────────────────────
+
+_ct: "ClaudeTerminal | None" = None
+
+def _init_claudio():
+    global _ct
+    if _CLAUDE_OK:
+        _ct = ClaudeTerminal()
+        st = _ct.status()
+        print(f"[AMANDA←CLÁUDIO] boot: cli={st['cli_instalado']} api={st['api_ok']} workdir={st['workdir']}")
+    else:
+        print("[AMANDA] ClaudeTerminal não disponível — só Gemini ativo")
+
+
+def pensar_claudio(contexto: str, pesado: bool = False) -> str:
+    """
+    Consulta Cláudio (Claude) para raciocínio mais profundo.
+    pesado=True → usa claude CLI com ferramentas (bash, arquivos).
+    pesado=False → API direta, rápido (< 2s).
+    Fallback para Gemini se Cláudio estiver offline.
+    """
+    if _ct is None:
+        return pensar(contexto)
+    if pesado:
+        return _ct.executar(contexto)
+    return _ct.pensar(contexto)
+
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
@@ -606,10 +647,14 @@ def ciclo_amanda():
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "fonte": "amanda-dht11",
                 })
+                # Manter Cláudio informado sobre sensores
+                if _ct:
+                    _ct.atualizar_sensor("temperatura", f"{dados['temperatura']}°C")
+                    _ct.atualizar_sensor("umidade", f"{dados['umidade']}%")
                 # Espelhar temperatura na expressão da MEKY
                 meky_temperatura(dados["temperatura"], dados.get("umidade", 0))
 
-                # A cada 10 leituras: pensar sobre os dados
+                # A cada 10 leituras: pensar sobre os dados (Gemini rápido)
                 if round(agora) % 20 == 0:
                     contexto = (
                         f"Temperatura do lab: {dados['temperatura']}°C, "
@@ -678,10 +723,43 @@ def ciclo_amanda():
         time.sleep(0.5)
 
 
+def gerar_video_relatorio(eventos: list[str] | None = None, titulo: str | None = None) -> None:
+    """Gera um vídeo motion graphics de relatório do laboratório e envia por email."""
+    if not _VIDEO_OK:
+        print("[AMANDA-VIDEO] lib.video_pipeline não disponível — pulando geração")
+        return
+    data_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    eventos = eventos or ["Laboratório ativo", "Sensores funcionando", "Amanda em operação"]
+    titulo  = titulo or f"Amanda — Relatório {data_str}"
+    cenas   = cenas_amanda_relatorio(data_str, eventos)
+    try:
+        gerar_video(cenas, titulo=titulo, remetente_nome="Amanda")
+        print(f"[AMANDA-VIDEO] Vídeo enviado: {titulo}")
+    except Exception as e:
+        print(f"[AMANDA-VIDEO] Erro: {e}")
+
+
+def gerar_video_meky(memorias: list[str] | None = None, estado: str = "ativo") -> None:
+    """Gera vídeo de status do MEKY com suas memórias recentes e envia por email."""
+    if not _VIDEO_OK:
+        return
+    data_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    mems     = memorias or meky_ler_memoria()
+    textos   = [m.get("content", str(m))[:120] for m in mems[:5]] if isinstance(mems[0] if mems else None, dict) else (mems or [])
+    cenas    = cenas_meky_status(estado, textos)
+    try:
+        gerar_video(cenas, titulo=f"MEKY — Status {data_str}", remetente_nome="MEKY")
+        print(f"[AMANDA-VIDEO] Vídeo MEKY enviado")
+    except Exception as e:
+        print(f"[AMANDA-VIDEO] Erro MEKY video: {e}")
+
+
 def ciclo_dream():
     """Amanda sonha periodicamente — síntese do dia, mapa 3D e integração com MEKY."""
+    ciclo = 0
     while True:
         time.sleep(3600 * 3)  # a cada 3h
+        ciclo += 1
 
         # Entrar em modo sonho: MEKY também dorme junto
         notificar_dodge("sonho")
@@ -696,12 +774,24 @@ def ciclo_dream():
             "É hora do sonho de Amanda. Sintetize o que aconteceu no laboratório hoje "
             "em uma frase poética no estilo Amanda PX. Registre como memória."
         )
-        sintese = pensar(contexto)
+        # Sonho profundo: Cláudio sintetiza com mais nuance; fallback Gemini
+        sintese = pensar_claudio(contexto) if _ct else pensar(contexto)
         escrever_memoria(f"[AMANDA-SONHO] {sintese}")
+        if _ct:
+            _ct.registrar_evento(f"sonho ciclo {ciclo}: {sintese[:80]}")
         print(f"[AMANDA sonho] {sintese}")
 
         # Acordar MEKY após sonho
         meky_expressar("idle")
+
+        # A cada 8 ciclos (≈24h): gerar vídeo-resumo e enviar por email
+        if ciclo % 8 == 0:
+            mems_meky = meky_ler_memoria()
+            gerar_video_meky(memorias=mems_meky, estado="ativo")
+            gerar_video_relatorio(
+                eventos=[sintese, "Mapa 3D consolidado", "MEKY integrado"],
+                titulo=f"Amanda — Resumo Diário {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+            )
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
@@ -711,6 +801,9 @@ if __name__ == "__main__":
     print("  AMANDA — Inteligência de Borda da Mac")
     print("  Marta Centaurus | Lab Yuri Tuccieterovic")
     print("=" * 50)
+
+    # Inicializar Cláudio (Termux interno)
+    _init_claudio()
 
     # Thread de sonho em background
     t = threading.Thread(target=ciclo_dream, daemon=True)
