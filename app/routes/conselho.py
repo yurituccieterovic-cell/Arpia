@@ -22,8 +22,9 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/conselho", tags=["conselho"])
 
-BLUEPRINT_PATH = Path("/root/Arpia/current_blueprint.md")
-PROPOSTAS_PATH = Path("/root/Arpia/propostas.json")
+_BASE = Path(__file__).parent.parent.parent
+BLUEPRINT_PATH = _BASE / "current_blueprint.md"
+PROPOSTAS_PATH = _BASE / "propostas.json"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

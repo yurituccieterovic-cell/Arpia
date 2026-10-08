@@ -75,7 +75,8 @@ MC_TOKEN      = _SECRETS.get("MC_TOKEN", "")
 GMAIL_ACCOUNT = _SECRETS.get("GMAIL_ACCOUNT", "luddlocke@gmail.com")
 GMAIL_PASS    = _SECRETS.get("GMAIL_APP_PASSWORD", "")
 
-TRAIL_FILE       = Path("/root/Arpia/MC_TRAIL.md")
+_BASE = Path(__file__).parent.parent.parent.parent
+TRAIL_FILE       = _BASE / "MC_TRAIL.md"
 TERMUX_INBOX     = Path("/root/mc-termux-inbox.json")
 
 
@@ -176,7 +177,7 @@ async def diapedese(node: Node, context: str = "") -> DiapedeseResult:
             result.status = "ok"
 
         elif node == Node.GRID:
-            grid_js = Path("/root/Arpia/app/core/grid_generator.js")
+            grid_js = _BASE / "app" / "core" / "grid_generator.js"
             if grid_js.exists():
                 data = grid_js.read_bytes()
                 result.log_hash = hashlib.sha256(data).hexdigest()
@@ -187,7 +188,7 @@ async def diapedese(node: Node, context: str = "") -> DiapedeseResult:
 
         elif node == Node.MANGA_DB:
             # Verificação leve: arquivo de schema existe
-            schema = Path("/root/Arpia/app/models")
+            schema = _BASE / "app" / "models"
             models = list(schema.glob("*.py"))
             state_str = str(sorted(m.name for m in models))
             result.log_hash = hashlib.sha256(state_str.encode()).hexdigest()
