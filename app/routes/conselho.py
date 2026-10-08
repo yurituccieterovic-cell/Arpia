@@ -95,73 +95,55 @@ async def criar_proposta(req: PropostaRequest):
 
 
 async def _run_artesao(pid: str, req: PropostaRequest):
-    """Roda o Artesão em background, depois aciona o Ajudante."""
+    """Artesão via Gemini direto (sem ADK — compatível com Render free)."""
     try:
-        from google.adk.runners import Runner
-        from google.adk.sessions import InMemorySessionService
-        from google.genai.types import Part, Content
-        from app.agents.artesao import criar_artesao, criar_ajudante
-        import uuid
+        import google.generativeai as genai
+        gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        if not gemini_key:
+            raise ValueError("GEMINI_API_KEY não configurada")
+        genai.configure(api_key=gemini_key)
 
-        # ── Artesão ──────────────────────────────────────────────────────────
-        agent = criar_artesao()
-        ss = InMemorySessionService()
-        runner = Runner(agent=agent, app_name="arpia", session_service=ss)
-        sid = str(uuid.uuid4())
-        await ss.create_session(app_name="arpia", user_id="arpia", session_id=sid)
+        ARTESAO_SYSTEM = (
+            "Você é o Artesão do Conselho — arquiteto técnico do ecossistema Sociedade Tucci. "
+            "Recebe demandas de IAs e humanos e cria Blueprints de implementação detalhados. "
+            "Seu Blueprint sempre inclui: OBJETIVO, COMPONENTES AFETADOS (arquivos/serviços/IAs), "
+            "PLANO em passos numerados, COMPLEXIDADE (S/M/L/XL), e RISCOS. "
+            "Seja preciso, técnico e conciso. Máximo 800 tokens."
+        )
 
-        prompt = f"""Nova proposta do ecossistema:
-ORIGEM: {req.origem} | PROJETO: {req.projeto} | URGÊNCIA: {req.urgencia}
-TÍTULO: {req.titulo}
-DESCRIÇÃO: {req.descricao}
+        prompt_artesao = (
+            f"Nova proposta do ecossistema:\n"
+            f"ORIGEM: {req.origem} | PROJETO: {req.projeto or 'N/A'} | URGÊNCIA: {req.urgencia or 'media'}\n"
+            f"TÍTULO: {req.titulo}\n"
+            f"DESCRIÇÃO: {req.descricao}\n\n"
+            "Crie um Blueprint completo."
+        )
 
-Arquitete um Blueprint completo para esta proposta. Inclua:
-- OBJETIVO claro
-- COMPONENTES afetados (arquivos, serviços, IAs)
-- PLANO em passos numerados
-- ESTIMATIVA DE COMPLEXIDADE (S/M/L/XL) e tokens
-- RISCOS"""
-
-        user_msg = Content(role="user", parts=[Part(text=prompt)])
-        parts = []
-        async for event in runner.run_async(user_id="arpia", session_id=sid, new_message=user_msg):
-            if hasattr(event, "content") and event.content:
-                for p in event.content.parts:
-                    if hasattr(p, "text") and p.text:
-                        parts.append(p.text)
-
-        blueprint = "\n".join(parts)
+        model = genai.GenerativeModel("gemini-2.0-flash", system_instruction=ARTESAO_SYSTEM)
+        resp = await asyncio.to_thread(model.generate_content, prompt_artesao)
+        blueprint = resp.text if hasattr(resp, "text") else str(resp)
 
         propostas = _load_propostas()
         propostas[pid]["blueprint"] = blueprint
         propostas[pid]["status"] = "aguardando_ajudante"
         _save_propostas(propostas)
 
-        # ── Ajudante ─────────────────────────────────────────────────────────
-        ajudante = criar_ajudante()
-        ss2 = InMemorySessionService()
-        runner2 = Runner(agent=ajudante, app_name="arpia", session_service=ss2)
-        sid2 = str(uuid.uuid4())
-        await ss2.create_session(app_name="arpia", user_id="arpia", session_id=sid2)
+        # ── Ajudante revisa ───────────────────────────────────────────────────
+        AJUDANTE_SYSTEM = (
+            "Você é o Ajudante do Conselho — revisor crítico de Blueprints. "
+            "Analise o Blueprint do Artesão e classifique segundo a Malha de Pedágio: "
+            "FAST TRACK (<10k tokens), MÉDIO (10k-50k), BUROCRÁTICO (>50k). "
+            "Aponte pontos cegos, riscos e sugira melhorias. Máximo 400 tokens."
+        )
 
-        revisao_prompt = f"""Revise este Blueprint do Artesão:
+        prompt_ajudante = (
+            f"Revise este Blueprint:\n\n{blueprint}\n\n"
+            "Critique e classifique pela Malha de Pedágio."
+        )
 
-{blueprint}
-
-Critique e classifique segundo a Malha de Pedágio:
-- FAST TRACK (<10k tokens): aprovação direta
-- MÉDIO (10k-50k): revisão + assinatura dupla
-- BUROCRÁTICO (>50k): moratória + fatiamento"""
-
-        rev_msg = Content(role="user", parts=[Part(text=revisao_prompt)])
-        rev_parts = []
-        async for event in runner2.run_async(user_id="arpia", session_id=sid2, new_message=rev_msg):
-            if hasattr(event, "content") and event.content:
-                for p in event.content.parts:
-                    if hasattr(p, "text") and p.text:
-                        rev_parts.append(p.text)
-
-        revisao = "\n".join(rev_parts)
+        model2 = genai.GenerativeModel("gemini-2.0-flash", system_instruction=AJUDANTE_SYSTEM)
+        resp2 = await asyncio.to_thread(model2.generate_content, prompt_ajudante)
+        revisao = resp2.text if hasattr(resp2, "text") else str(resp2)
 
         propostas = _load_propostas()
         propostas[pid]["revisao_ajudante"] = revisao
