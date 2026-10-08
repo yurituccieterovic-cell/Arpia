@@ -119,7 +119,7 @@ async def _run_artesao(pid: str, req: PropostaRequest):
             "Crie um Blueprint completo."
         )
 
-        model = genai.GenerativeModel("gemini-2.0-flash", system_instruction=ARTESAO_SYSTEM)
+        model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=ARTESAO_SYSTEM)
         resp = await asyncio.to_thread(model.generate_content, prompt_artesao)
         blueprint = resp.text if hasattr(resp, "text") else str(resp)
 
@@ -141,7 +141,7 @@ async def _run_artesao(pid: str, req: PropostaRequest):
             "Critique e classifique pela Malha de Pedágio."
         )
 
-        model2 = genai.GenerativeModel("gemini-2.0-flash", system_instruction=AJUDANTE_SYSTEM)
+        model2 = genai.GenerativeModel("gemini-2.5-flash", system_instruction=AJUDANTE_SYSTEM)
         resp2 = await asyncio.to_thread(model2.generate_content, prompt_ajudante)
         revisao = resp2.text if hasattr(resp2, "text") else str(resp2)
 
