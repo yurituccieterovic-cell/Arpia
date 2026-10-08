@@ -12,12 +12,17 @@ class Base(DeclarativeBase):
 
 def _make_engine():
     cfg = get_settings()
+    url = cfg.database_url
+    # asyncpg não aceita ?sslmode= — remover e usar connect_args
+    if "sslmode=" in url:
+        url = url.split("?")[0]
     return create_async_engine(
-        cfg.database_url,
+        url,
         echo=cfg.debug,
         pool_size=5,
         max_overflow=10,
         pool_pre_ping=True,
+        connect_args={"ssl": "require"},
     )
 
 
