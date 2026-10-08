@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
     import logging
     logger = logging.getLogger("arpia.startup")
     try:
-        await init_db()
+        await asyncio.wait_for(init_db(), timeout=15.0)
         logger.info("DB initialized OK")
     except Exception as e:
         logger.error(f"init_db failed (non-fatal): {e}")
