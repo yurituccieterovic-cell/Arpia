@@ -18,8 +18,13 @@ from app.agents.animador import iniciar_loop, parar_loop
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    cfg = get_settings()
-    await init_db()
+    import logging
+    logger = logging.getLogger("arpia.startup")
+    try:
+        await init_db()
+        logger.info("DB initialized OK")
+    except Exception as e:
+        logger.error(f"init_db failed (non-fatal): {e}")
     animador_task = asyncio.create_task(iniciar_loop())
     yield
     parar_loop()
